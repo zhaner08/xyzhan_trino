@@ -22,6 +22,7 @@ import com.google.common.collect.Iterables;
 import com.google.common.io.Resources;
 import io.airlift.json.ObjectMapperProvider;
 import io.trino.Session;
+import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoInputFile;
 import io.trino.filesystem.hdfs.HdfsFileSystemFactory;
@@ -42,8 +43,8 @@ import io.trino.plugin.deltalake.transactionlog.checkpoint.CheckpointSchemaManag
 import io.trino.plugin.deltalake.transactionlog.checkpoint.TransactionLogTail;
 import io.trino.plugin.deltalake.transactionlog.statistics.DeltaLakeFileStatistics;
 import io.trino.plugin.hive.parquet.TrinoParquetDataSource;
-import io.trino.spi.Page;
 import io.trino.spi.block.Block;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.SqlDate;
 import io.trino.spi.type.SqlTimestamp;
@@ -64,8 +65,10 @@ import java.io.File;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -78,6 +81,7 @@ import java.util.Set;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
@@ -137,7 +141,8 @@ public class TestDeltaLakeBasic
             new ResourceTable("variant_types", "databricks153/variant_types"),
             new ResourceTable("type_widening", "databricks153/type_widening"),
             new ResourceTable("type_widening_partition", "databricks153/type_widening_partition"),
-            new ResourceTable("type_widening_nested", "databricks153/type_widening_nested"));
+            new ResourceTable("type_widening_nested", "databricks153/type_widening_nested"),
+            new ResourceTable("in_commit_timestamp_history_read", "deltalake/in_commit_timestamp_history_read"));
 
     // The col-{uuid} pattern for delta.columnMapping.physicalName
     private static final Pattern PHYSICAL_COLUMN_NAME_PATTERN = Pattern.compile("^col-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
@@ -392,7 +397,7 @@ public class TestDeltaLakeBasic
             ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, Optional.empty());
             try (ParquetReader reader = createParquetReader(dataSource, parquetMetadata, ImmutableList.of(addEntryType), List.of("add"))) {
                 List<Object> actual = new ArrayList<>();
-                Page page = reader.nextPage();
+                SourcePage page = reader.nextPage();
                 while (page != null) {
                     Block block = page.getBlock(0);
                     for (int i = 0; i < block.getPositionCount(); i++) {
@@ -2353,6 +2358,140 @@ public class TestDeltaLakeBasic
         assertQueryFails(
                 "CALL delta.system.vacuum('tpch', 'unsupported_writer_version', '7d')",
                 "Cannot execute vacuum procedure with 8 writer version");
+    }
+
+    /**
+     * @see deltalake.in_commit_timestamp_history_read
+     */
+    @Test
+    public void testReadInCommitTimestampInHistoryTable()
+            throws Exception
+    {
+        String tableName = "in_commit_timestamp_history_read_" + randomNameSuffix();
+        Path tableLocation = catalogDir.resolve(tableName);
+        copyDirectoryContents(new File(Resources.getResource("deltalake/in_commit_timestamp_history_read").toURI()).toPath(), tableLocation);
+        assertUpdate("CALL system.register_table(CURRENT_SCHEMA, '%s', '%s')".formatted(tableName, tableLocation.toUri()));
+
+        assertQuery("SELECT * FROM " + tableName, "VALUES (1, 1), (5, 5)");
+
+        // The first two versions commitInfo doesn't contain `inCommitTimestamp`, the value is read from `timestamp` in commitInfo
+        // The last two versions commitInfo contain `inCommitTimestamp`, the value is read from it.
+        assertQuery("SELECT date_diff('millisecond', TIMESTAMP '1970-01-01 00:00:00 UTC', timestamp) FROM \"%s$history\"".formatted(tableName), "VALUES 1739859668531L, 1739859684775L, 1739859743394L, 1739859755480L");
+    }
+
+    /**
+     * @see deltalake.clone_merge
+     */
+    @Test
+    public void testMergeOnClonedTable()
+            throws Exception
+    {
+        testMergeOnClonedTable(
+                "deltalake/clone_merge/clone_merge_source",
+                "deltalake/clone_merge/clone_merge_cloned",
+                "clone_merge_source",
+                "spark_catalog.tiny.clone_merge_source");
+        testMergeOnClonedTable(
+                "deltalake/clone_merge/clone_merge_deletion_vector_source",
+                "deltalake/clone_merge/clone_merge_deletion_vector_cloned",
+                "clone_merge_deletion_vector_source",
+                "spark_catalog.tiny.clone_merge_deletion_vector_source");
+    }
+
+    private void testMergeOnClonedTable(String sourceResourceName, String clonedResourceName, String sourceTableDir, String oldSchemaTableName)
+            throws Exception
+    {
+        String sourceTable = sourceTableDir + randomNameSuffix();
+        // load source table to a random suffix sub dir of the catalogDir
+        Path sourceLocation = catalogDir.resolve("clone_test_dir" + randomNameSuffix()).resolve(sourceTableDir);
+        FILE_SYSTEM.createDirectory(Location.of(sourceLocation.toString()));
+        copyDirectoryContents(new File(Resources.getResource(sourceResourceName).toURI()).toPath(), sourceLocation);
+        assertUpdate("CALL system.register_table(CURRENT_SCHEMA, '%s', '%s')".formatted(sourceTable, sourceLocation.toUri()));
+
+        @Language("SQL") String sourceTableValues = """
+                VALUES
+                (1, 'A', TIMESTAMP '2024-01-01'),
+                (2, 'B', TIMESTAMP '2024-01-01'),
+                (3, 'C', TIMESTAMP '2024-02-02'),
+                (4, 'D', TIMESTAMP '2024-02-02')
+                """;
+
+        assertQuery("SELECT * FROM " + sourceTable, sourceTableValues);
+
+        String clonedTable = "test_clone_merge_cloned_" + randomNameSuffix();
+        Path cloneTableLocation = sourceLocation.resolveSibling(clonedTable);
+        copyDirectoryContents(new File(Resources.getResource(clonedResourceName).toURI()).toPath(), cloneTableLocation);
+
+        String schema = getSession().getSchema().orElseThrow();
+        // Replace the fixed s3 prefix with actual(local) absolute path prefix and update reference source
+        updateClonedTableDeletionVectorPathPrefixAndSource(cloneTableLocation, "file://" + sourceLocation, oldSchemaTableName, schema + "." + sourceTable);
+
+        assertUpdate("CALL system.register_table(CURRENT_SCHEMA, '%s', '%s')".formatted(clonedTable, cloneTableLocation.toUri()));
+
+        // cloned table without any changes
+        assertQuery("SELECT * FROM " + clonedTable, sourceTableValues);
+
+        // update on cloned table
+        @Language("SQL") String expectedValuesAfterUpdate = """
+                VALUES
+                (1, 'A', TIMESTAMP '2024-01-01'),
+                (2, 'updated', TIMESTAMP '2024-01-01'),
+                (3, 'C', TIMESTAMP '2024-02-02'),
+                (4, 'updated', TIMESTAMP '2024-02-02')
+        """;
+        assertUpdate("UPDATE " + clonedTable + " SET v = 'updated' WHERE id IN (2, 4)", 2);
+        assertQuery("SELECT * FROM " + clonedTable, expectedValuesAfterUpdate);
+
+        // merge on cloned table, including insert,update,delete
+        String mergeSql = """
+                MERGE INTO %s t
+                USING (VALUES (1, 'yyy', TIMESTAMP '2025-01-01'), (2, 'merged', TIMESTAMP '2025-02-02'), (5, 'kkk', TIMESTAMP '2025-03-03')) AS s(id, v, part)
+                ON (t.id = s.id)
+                WHEN MATCHED AND s.v = 'yyy' THEN DELETE
+                WHEN MATCHED THEN UPDATE SET v = s.v
+                WHEN NOT MATCHED THEN INSERT (id, v, part) VALUES(s.id, s.v, s.part)
+                """.formatted(clonedTable);
+
+        @Language("SQL") String expectedValuesAfterMerge = """
+                VALUES
+                (2, 'merged', TIMESTAMP '2024-01-01'),
+                (3, 'C', TIMESTAMP '2024-02-02'),
+                (4, 'updated', TIMESTAMP '2024-02-02'),
+                (5, 'kkk', TIMESTAMP '2025-03-03')
+                """;
+
+        assertUpdate(mergeSql, 3);
+        assertQuery("SELECT * FROM " + clonedTable, expectedValuesAfterMerge);
+
+        // source table not change
+        assertQuery("SELECT * FROM " + sourceTable, sourceTableValues);
+    }
+
+    public static void updateClonedTableDeletionVectorPathPrefixAndSource(Path location, String newPrefix, String oldSchemaTableName, String newSchemaTableName)
+            throws IOException
+    {
+        String oldPrefix = "s3://test-bucket/tiny/clone_merge_deletion_vector_source";
+        Pattern pattern = Pattern.compile("(?<=\"(pathOrInlineDv|path)\":\")" + Pattern.quote(oldPrefix));
+
+        Pattern patternForSchemaTableName = Pattern.compile("(?<=\"source\":\")" + Pattern.quote(oldSchemaTableName));
+
+        try (Stream<Path> stream = Files.walk(location)) {
+            stream.filter(file -> !Files.isDirectory(file))
+                    .filter(file -> file.getFileName().toString().endsWith(".json"))
+                    .forEach(file -> {
+                        try {
+                            String content = Files.readString(file);
+                            String newContent = pattern.matcher(content).replaceAll(newPrefix);
+                            newContent = patternForSchemaTableName.matcher(newContent).replaceAll("spark_catalog." + newSchemaTableName);
+
+                            if (!content.equals(newContent)) {
+                                Files.write(file, newContent.getBytes(StandardCharsets.UTF_8), StandardOpenOption.TRUNCATE_EXISTING);
+                            }
+                        } catch (IOException e) {
+                            throw new RuntimeException(e);
+                        }
+                    });
+        }
     }
 
     private static MetadataEntry loadMetadataEntry(long entryNumber, Path tableLocation)

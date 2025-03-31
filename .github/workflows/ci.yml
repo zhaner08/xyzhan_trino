@@ -57,8 +57,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { java-version: 23, cache: 'true', cleanup-node: true }
-          - { java-version: 24-ea, cache: 'restore', cleanup-node: true }
+          - { java-version: 24, cache: 'true', cleanup-node: true }
+          - { java-version: 25-ea, cache: 'false', cleanup-node: true }
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -115,7 +115,7 @@ jobs:
           $MAVEN failsafe:integration-test failsafe:verify -B --strict-checksums -P ci -pl :trino-jdbc
       - name: Clean Maven Output
         run: $MAVEN clean -pl '!:trino-server,!:trino-cli'
-      - uses: docker/setup-qemu-action@4574d27a4764455b42196d70a065bc6853246a25 # v3
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
         with:
           platforms: arm64,ppc64le
       - name: Build and Test Docker Image
@@ -188,6 +188,7 @@ jobs:
         timeout-minutes: 10
         with:
           cache: restore
+          java-version: '23'
       - name: Maven Install
         run: |
           # build everything to make sure dependencies of impacted modules are present
@@ -276,16 +277,6 @@ jobs:
           if [ "${AWS_ACCESS_KEY_ID}" != "" ] && ( [ ! -f gib-impacted.log ] || grep -q plugin/trino-hive gib-impacted.log ); then
             $MAVEN test ${MAVEN_TEST} -pl :trino-hive -P aws-tests
           fi
-      - name: Run Hive Unity Tests
-        id: test-unity
-        env:
-          DATABRICKS_HOST: ${{ vars.TRINO_DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.TRINO_DATABRICKS_TOKEN }}
-          DATABRICKS_UNITY_CATALOG_NAME: ${{ vars.TRINO_DATABRICKS_UNITY_CATALOG_NAME }}
-        run: |
-          if [ "${DATABRICKS_TOKEN}" != "" ] && ( [ ! -f gib-impacted.log ] || grep -q plugin/trino-hive gib-impacted.log ); then
-            $MAVEN test ${MAVEN_TEST} -pl :trino-hive -P unity-tests
-          fi
       - name: Upload test results
         uses: ./.github/actions/process-test-results
         if: always()
@@ -358,7 +349,6 @@ jobs:
             !:trino-ignite,
             !:trino-jdbc,
             !:trino-kafka,
-            !:trino-kudu,
             !:trino-main,
             !:trino-mariadb,
             !:trino-memory,
@@ -369,12 +359,12 @@ jobs:
             !:trino-oracle,
             !:trino-orc,
             !:trino-parquet,
-            !:trino-phoenix5,
             !:trino-pinot,
             !:trino-postgresql,
             !:trino-redis,
             !:trino-redshift,
             !:trino-resource-group-managers,
+            !:trino-server-core,
             !:trino-server,
             !:trino-singlestore,
             !:trino-snowflake,
@@ -479,14 +469,12 @@ jobs:
             - { modules: plugin/trino-iceberg, profile: minio-and-avro }
             - { modules: plugin/trino-ignite }
             - { modules: plugin/trino-kafka }
-            - { modules: plugin/trino-kudu }
             - { modules: plugin/trino-mariadb }
             - { modules: plugin/trino-mongodb }
             - { modules: plugin/trino-mysql }
             - { modules: plugin/trino-openlineage }
             - { modules: plugin/trino-opensearch }
             - { modules: plugin/trino-oracle }
-            - { modules: plugin/trino-phoenix5 }
             - { modules: plugin/trino-pinot }
             - { modules: plugin/trino-postgresql }
             - { modules: plugin/trino-redis }
@@ -530,7 +518,7 @@ jobs:
         with:
           cache: restore
           cleanup-node: ${{ format('{0}', matrix.modules == 'plugin/trino-singlestore' || matrix.modules == 'plugin/trino-exasol') }}
-          java-version: ${{ matrix.jdk != '' && matrix.jdk || '23' }}
+          java-version: ${{ matrix.jdk != '' && matrix.jdk || '24' }}
       - name: Maven Install
         run: |
           export MAVEN_OPTS="${MAVEN_INSTALL_OPTS}"
@@ -538,8 +526,7 @@ jobs:
       - name: Maven Tests
         id: tests
         if: >-
-          matrix.modules != 'plugin/trino-singlestore'
-          && ! (contains(matrix.modules, 'trino-bigquery') && contains(matrix.profile, 'cloud-tests-2'))
+          ! (contains(matrix.modules, 'trino-bigquery') && contains(matrix.profile, 'cloud-tests-2'))
           && ! (contains(matrix.modules, 'trino-delta-lake') && contains(matrix.profile, 'cloud-tests'))
           && ! (contains(matrix.modules, 'trino-iceberg') && contains(matrix.profile, 'cloud-tests'))
           && ! (contains(matrix.modules, 'trino-redshift') && contains(matrix.profile, 'cloud-tests'))
@@ -641,13 +628,6 @@ jobs:
             -Dtesting.azure-abfs-access-key="${ABFS_ACCESSKEY}" \
             -Dtesting.gcp-storage-bucket="${GCP_STORAGE_BUCKET}" \
             -Dtesting.gcp-credentials-key="${GCP_CREDENTIALS_KEY}"
-      - name: Memsql Tests
-        id: tests-memsql
-        env:
-          MEMSQL_LICENSE: ${{ secrets.MEMSQL_LICENSE }}
-        if: matrix.modules == 'plugin/trino-singlestore' && (env.CI_SKIP_SECRETS_PRESENCE_CHECKS != '' || env.MEMSQL_LICENSE != '')
-        run: |
-          $MAVEN test ${MAVEN_TEST} -pl :trino-singlestore -Dmemsql.license=${MEMSQL_LICENSE}
       - name: Cloud BigQuery Tests
         id: tests-bq
         env:
@@ -803,7 +783,6 @@ jobs:
               || steps.tests-azure.outcome == 'failure'
               || steps.tests-gcs.outcome == 'failure'
               || steps.tests-delta.outcome == 'failure'
-              || steps.tests-memsql.outcome == 'failure'
               || steps.tests-bq.outcome == 'failure'
               || steps.tests-bq-ci.outcome == 'failure'
               || steps.tests-bq-smoke.outcome == 'failure'
@@ -900,7 +879,6 @@ jobs:
             - suite-delta-lake-databricks133
             - suite-delta-lake-databricks143
             - suite-delta-lake-databricks154
-            - suite-databricks-unity-http-hms
             - suite-ranger
             - suite-gcs
             - suite-clients
@@ -947,11 +925,6 @@ jobs:
               ignore exclusion if: >-
                 ${{ env.CI_SKIP_SECRETS_PRESENCE_CHECKS != '' || secrets.DATABRICKS_TOKEN != '' }}
             - suite: suite-delta-lake-databricks154
-              ignore exclusion if: >-
-                ${{ env.CI_SKIP_SECRETS_PRESENCE_CHECKS != '' || secrets.DATABRICKS_TOKEN != '' }}
-            - suite: suite-databricks-unity-http-hms
-              config: hdp3
-            - suite: suite-databricks-unity-http-hms
               ignore exclusion if: >-
                 ${{ env.CI_SKIP_SECRETS_PRESENCE_CHECKS != '' || secrets.DATABRICKS_TOKEN != '' }}
             - suite: suite-snowflake
@@ -1003,10 +976,6 @@ jobs:
           DATABRICKS_133_JDBC_URL: ""
           DATABRICKS_143_JDBC_URL: ""
           DATABRICKS_154_JDBC_URL: ""
-          DATABRICKS_UNITY_JDBC_URL: ""
-          DATABRICKS_UNITY_CATALOG_NAME: ""
-          DATABRICKS_UNITY_EXTERNAL_LOCATION: ""
-          DATABRICKS_HOST: ""
           DATABRICKS_LOGIN: ""
           DATABRICKS_TOKEN: ""
           GCP_CREDENTIALS_KEY: ""
@@ -1079,10 +1048,6 @@ jobs:
           DATABRICKS_133_JDBC_URL: ${{ vars.DATABRICKS_133_JDBC_URL }}
           DATABRICKS_143_JDBC_URL: ${{ vars.DATABRICKS_143_JDBC_URL }}
           DATABRICKS_154_JDBC_URL: ${{ vars.DATABRICKS_154_JDBC_URL }}
-          DATABRICKS_UNITY_JDBC_URL: ${{ vars.DATABRICKS_UNITY_JDBC_URL }}
-          DATABRICKS_UNITY_CATALOG_NAME: ${{ vars.DATABRICKS_UNITY_CATALOG_NAME }}
-          DATABRICKS_UNITY_EXTERNAL_LOCATION: ${{ vars.DATABRICKS_UNITY_EXTERNAL_LOCATION }}
-          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_LOGIN: token
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
           GCP_CREDENTIALS_KEY: ${{ secrets.GCP_CREDENTIALS_KEY }}

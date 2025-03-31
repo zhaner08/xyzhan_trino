@@ -24,7 +24,6 @@ import io.trino.spi.connector.SchemaTableName;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.TestingConnectorBehavior;
 import org.apache.iceberg.BaseTable;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
@@ -35,7 +34,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
-@Disabled("https://github.com/trinodb/trino/issues/25129")
 @TestInstance(PER_CLASS)
 final class TestIcebergS3TablesConnectorSmokeTest
         extends BaseIcebergConnectorSmokeTest
@@ -56,7 +54,8 @@ final class TestIcebergS3TablesConnectorSmokeTest
         return switch (connectorBehavior) {
             case SUPPORTS_CREATE_MATERIALIZED_VIEW,
                  SUPPORTS_RENAME_MATERIALIZED_VIEW,
-                 SUPPORTS_RENAME_SCHEMA -> false;
+                 SUPPORTS_RENAME_SCHEMA,
+                 SUPPORTS_RENAME_TABLE -> false;
             default -> super.hasBehavior(connectorBehavior);
         };
     }
@@ -76,12 +75,11 @@ final class TestIcebergS3TablesConnectorSmokeTest
                 .addIcebergProperty("iceberg.rest-catalog.signing-name", "glue")
                 .addIcebergProperty("iceberg.writer-sort-buffer-size", "1MB")
                 .addIcebergProperty("iceberg.allowed-extra-properties", "write.metadata.delete-after-commit.enabled,write.metadata.previous-versions-max")
-                .addIcebergProperty("fs.hadoop.enabled", "false")
                 .addIcebergProperty("fs.native-s3.enabled", "true")
                 .addIcebergProperty("s3.region", AWS_REGION)
                 .addIcebergProperty("s3.aws-access-key", AWS_ACCESS_KEY_ID)
                 .addIcebergProperty("s3.aws-secret-key", AWS_SECRET_ACCESS_KEY)
-                .disableSchemaInitializer()
+                .setInitialTables(REQUIRED_TPCH_TABLES)
                 .build();
     }
 
@@ -137,7 +135,8 @@ final class TestIcebergS3TablesConnectorSmokeTest
                         "WITH \\(\n" +
                         "   format = 'PARQUET',\n" +
                         "   format_version = 2,\n" +
-                        "   location = 's3://.*--table-s3'\n" +
+                        "   location = 's3://.*--table-s3',\n" +
+                        "   max_commit_retry = 4\n" +
                         "\\)");
     }
 
@@ -174,14 +173,6 @@ final class TestIcebergS3TablesConnectorSmokeTest
     public void testRenameTable()
     {
         assertThatThrownBy(super::testRenameTable)
-                .hasStackTraceContaining("Unable to process: RenameTable endpoint is not supported for Glue Catalog");
-    }
-
-    @Test
-    @Override
-    public void testRenameTableAcrossSchemas()
-    {
-        assertThatThrownBy(super::testRenameTableAcrossSchemas)
                 .hasStackTraceContaining("Unable to process: RenameTable endpoint is not supported for Glue Catalog");
     }
 

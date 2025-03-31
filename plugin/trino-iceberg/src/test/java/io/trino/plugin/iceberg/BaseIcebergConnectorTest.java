@@ -160,6 +160,7 @@ import static java.time.ZoneOffset.UTC;
 import static java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME;
 import static java.util.Collections.nCopies;
 import static java.util.Locale.ENGLISH;
+import static java.util.Map.entry;
 import static java.util.Objects.requireNonNull;
 import static java.util.UUID.randomUUID;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -296,6 +297,15 @@ public abstract class BaseIcebergConnectorTest
     {
         try (TestTable table = newTrinoTable("test_delete_", "WITH (format_version = 1) AS SELECT * FROM orders")) {
             assertQueryFails("DELETE FROM " + table.getName() + " WHERE custkey <= 100", "Iceberg table updates require at least format version 2");
+        }
+    }
+
+    @Test
+    public void testDeleteOnV1TableWhenManifestFileIsNotExist()
+    {
+        try (TestTable table = newTrinoTable("test_delete_", "(a bigint, dt date) WITH (format_version = 1, partitioning = ARRAY['dt'])")) {
+            assertQuerySucceeds("DELETE FROM " + table.getName() + " WHERE dt = date '2025-02-17'");
+            assertQueryReturnsEmptyResult("SELECT * FROM " + table.getName());
         }
     }
 
@@ -4127,6 +4137,20 @@ public abstract class BaseIcebergConnectorTest
     }
 
     @Test
+    public void testPredicateOnDataColumnForPartitionedTableIsNotPushedDown()
+    {
+        try (TestTable testTable = newTrinoTable(
+                "test_predicate_on_data_column_for_partitioned_table_is_not_pushed_down",
+                "(a integer, dt date) WITH (partitioning = ARRAY['dt'])")) {
+            assertThat(query("SELECT * FROM " + testTable.getName() + " WHERE a = 10"))
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertUpdate("INSERT INTO " + testTable.getName() + " VALUES (10, date '2025-02-18')", 1);
+            assertThat(query("SELECT * FROM " + testTable.getName() + " WHERE a = 10"))
+                    .isNotFullyPushedDown(FilterNode.class);
+        }
+    }
+
+    @Test
     public void testPredicatesWithStructuralTypes()
     {
         String tableName = "test_predicate_with_structural_types";
@@ -5051,25 +5075,6 @@ public abstract class BaseIcebergConnectorTest
                         (format == ORC && testSetup.getTrinoTypeName().contains("timestamp(6)") ? 2 : expectedSplitCount));
             }
         }
-    }
-
-    @Test
-    public void testGetIcebergTableProperties()
-    {
-        assertUpdate("CREATE TABLE test_iceberg_get_table_props (x BIGINT)");
-        verifyIcebergTableProperties(computeActual("SELECT * FROM \"test_iceberg_get_table_props$properties\""));
-        assertUpdate("DROP TABLE test_iceberg_get_table_props");
-    }
-
-    protected void verifyIcebergTableProperties(MaterializedResult actual)
-    {
-        assertThat(actual).isNotNull();
-        MaterializedResult expected = resultBuilder(getSession())
-                .row("write.format.default", format.name())
-                .row("write.parquet.compression-codec", "zstd")
-                .row("commit.retry.num-retries", "4")
-                .build();
-        assertEqualsIgnoreOrder(actual.getMaterializedRows(), expected.getMaterializedRows());
     }
 
     @Test
@@ -6388,43 +6393,42 @@ public abstract class BaseIcebergConnectorTest
     public void testOptimizeWithFileModifiedTimeColumn()
             throws Exception
     {
-        String tableName = "test_optimize_with_file_modified_time_" + randomNameSuffix();
-        assertUpdate("CREATE TABLE " + tableName + " (id integer)");
+        try (TestTable table = newTrinoTable("test_optimize_with_file_modified_time_", "(id INT)")) {
+            String tableName = table.getName();
 
-        assertUpdate("INSERT INTO " + tableName + " VALUES (1)", 1);
-        storageTimePrecision.sleep(1);
-        assertUpdate("INSERT INTO " + tableName + " VALUES (2)", 1);
-        storageTimePrecision.sleep(1);
-        assertUpdate("INSERT INTO " + tableName + " VALUES (3)", 1);
-        storageTimePrecision.sleep(1);
-        assertUpdate("INSERT INTO " + tableName + " VALUES (4)", 1);
+            assertUpdate("INSERT INTO " + tableName + " VALUES (1)", 1);
+            storageTimePrecision.sleep(1);
+            assertUpdate("INSERT INTO " + tableName + " VALUES (2)", 1);
+            storageTimePrecision.sleep(1);
+            assertUpdate("INSERT INTO " + tableName + " VALUES (3)", 1);
+            storageTimePrecision.sleep(1);
+            assertUpdate("INSERT INTO " + tableName + " VALUES (4)", 1);
 
-        ZonedDateTime firstFileModifiedTime = (ZonedDateTime) computeScalar("SELECT \"$file_modified_time\" FROM " + tableName + " WHERE id = 1");
-        ZonedDateTime secondFileModifiedTime = (ZonedDateTime) computeScalar("SELECT \"$file_modified_time\" FROM " + tableName + " WHERE id = 2");
-        ZonedDateTime thirdFileModifiedTime = (ZonedDateTime) computeScalar("SELECT \"$file_modified_time\" FROM " + tableName + " WHERE id = 3");
-        ZonedDateTime fourthFileModifiedTime = (ZonedDateTime) computeScalar("SELECT \"$file_modified_time\" FROM " + tableName + " WHERE id = 4");
-        // Sanity check
-        assertThat(List.of(firstFileModifiedTime, secondFileModifiedTime, thirdFileModifiedTime, fourthFileModifiedTime))
-                .doesNotHaveDuplicates();
+            ZonedDateTime firstFileModifiedTime = (ZonedDateTime) computeScalar("SELECT \"$file_modified_time\" FROM " + tableName + " WHERE id = 1");
+            ZonedDateTime secondFileModifiedTime = (ZonedDateTime) computeScalar("SELECT \"$file_modified_time\" FROM " + tableName + " WHERE id = 2");
+            ZonedDateTime thirdFileModifiedTime = (ZonedDateTime) computeScalar("SELECT \"$file_modified_time\" FROM " + tableName + " WHERE id = 3");
+            ZonedDateTime fourthFileModifiedTime = (ZonedDateTime) computeScalar("SELECT \"$file_modified_time\" FROM " + tableName + " WHERE id = 4");
+            // Sanity check
+            assertThat(List.of(firstFileModifiedTime, secondFileModifiedTime, thirdFileModifiedTime, fourthFileModifiedTime))
+                    .doesNotHaveDuplicates();
 
-        List<String> initialFiles = getActiveFiles(tableName);
-        assertThat(initialFiles).hasSize(4);
+            List<String> initialFiles = getActiveFiles(tableName);
+            assertThat(initialFiles).hasSize(4);
 
-        storageTimePrecision.sleep(1);
-        // For optimize we need to set task_min_writer_count to 1, otherwise it will create more than one file.
-        assertQuerySucceeds(withSingleWriterPerTask(getSession()), "ALTER TABLE " + tableName + " EXECUTE OPTIMIZE WHERE " +
-                "\"$file_modified_time\" = from_iso8601_timestamp('" + firstFileModifiedTime.format(ISO_OFFSET_DATE_TIME) + "') OR " +
-                "\"$file_modified_time\" = from_iso8601_timestamp('" + secondFileModifiedTime.format(ISO_OFFSET_DATE_TIME) + "')");
-        assertQuerySucceeds(withSingleWriterPerTask(getSession()), "ALTER TABLE " + tableName + " EXECUTE OPTIMIZE WHERE " +
-                "\"$file_modified_time\" = from_iso8601_timestamp('" + thirdFileModifiedTime.format(ISO_OFFSET_DATE_TIME) + "') OR " +
-                "\"$file_modified_time\" = from_iso8601_timestamp('" + fourthFileModifiedTime.format(ISO_OFFSET_DATE_TIME) + "')");
+            storageTimePrecision.sleep(1);
+            // For optimize we need to set task_min_writer_count to 1, otherwise it will create more than one file.
+            assertQuerySucceeds(withSingleWriterPerTask(getSession()), "ALTER TABLE " + tableName + " EXECUTE OPTIMIZE WHERE " +
+                    "\"$file_modified_time\" = from_iso8601_timestamp('" + firstFileModifiedTime.format(ISO_OFFSET_DATE_TIME) + "') OR " +
+                    "\"$file_modified_time\" = from_iso8601_timestamp('" + secondFileModifiedTime.format(ISO_OFFSET_DATE_TIME) + "')");
+            assertQuerySucceeds(withSingleWriterPerTask(getSession()), "ALTER TABLE " + tableName + " EXECUTE OPTIMIZE WHERE " +
+                    "\"$file_modified_time\" = from_iso8601_timestamp('" + thirdFileModifiedTime.format(ISO_OFFSET_DATE_TIME) + "') OR " +
+                    "\"$file_modified_time\" = from_iso8601_timestamp('" + fourthFileModifiedTime.format(ISO_OFFSET_DATE_TIME) + "')");
 
-        List<String> updatedFiles = getActiveFiles(tableName);
-        assertThat(updatedFiles)
-                .hasSize(2)
-                .doesNotContainAnyElementsOf(initialFiles);
-
-        assertUpdate("DROP TABLE " + tableName);
+            List<String> updatedFiles = getActiveFiles(tableName);
+            assertThat(updatedFiles)
+                    .hasSize(2)
+                    .doesNotContainAnyElementsOf(initialFiles);
+        }
     }
 
     @Test
@@ -8513,17 +8517,66 @@ public abstract class BaseIcebergConnectorTest
                 .setCatalogSessionProperty(getSession().getCatalog().orElseThrow(), "compression_codec", compressionCodec.name())
                 .build();
         String tableName = "test_table_with_compression_" + compressionCodec;
-        String createTableSql = format("CREATE TABLE %s AS TABLE tpch.tiny.nation", tableName);
-        // TODO (https://github.com/trinodb/trino/issues/9142) Support LZ4 compression with native Parquet writer
-        if ((format == IcebergFileFormat.PARQUET || format == AVRO) && compressionCodec == HiveCompressionCodec.LZ4) {
+        String createTableSql = format("CREATE TABLE %s AS SELECT * FROM tpch.tiny.nation WITH NO DATA", tableName);
+        if (format == AVRO && compressionCodec == HiveCompressionCodec.LZ4) {
             assertTrinoExceptionThrownBy(() -> computeActual(session, createTableSql))
                     .hasMessage("Compression codec LZ4 not supported for " + format.humanName());
             return;
         }
-        assertUpdate(session, createTableSql, 25);
+        assertUpdate(session, createTableSql, 0);
+        verifyCodecInIcebergTableProperties(tableName, compressionCodec);
+        String insertIntoSql = format("INSERT INTO %s SELECT * FROM tpch.tiny.nation", tableName);
+        // TODO (https://github.com/trinodb/trino/issues/9142) Support LZ4 compression with native Parquet writer
+        if (format == IcebergFileFormat.PARQUET && compressionCodec == HiveCompressionCodec.LZ4) {
+            assertTrinoExceptionThrownBy(() -> computeActual(session, insertIntoSql))
+                    .hasMessage("Compression codec LZ4 not supported for " + format.humanName());
+            return;
+        }
+        assertUpdate(session, insertIntoSql, 25);
         assertQuery("SELECT * FROM " + tableName, "SELECT * FROM nation");
         assertQuery("SELECT count(*) FROM " + tableName, "VALUES 25");
         assertUpdate("DROP TABLE " + tableName);
+    }
+
+    protected void verifyCodecInIcebergTableProperties(String tableName, HiveCompressionCodec codec)
+    {
+        assertThat(tableName).isNotNull();
+        Optional<String> codecName = switch (format) {
+            case AVRO -> switch (codec) {
+                case NONE -> Optional.of("uncompressed");
+                case SNAPPY -> Optional.of("snappy");
+                case LZ4 -> Optional.empty(); // codec unsupported by Iceberg
+                case ZSTD -> Optional.of("zstd");
+                case GZIP -> Optional.of("gzip");
+            };
+            case ORC -> switch (codec) {
+                case NONE -> Optional.of("none");
+                case SNAPPY -> Optional.of("snappy");
+                case LZ4 -> Optional.of("lz4");
+                case ZSTD -> Optional.of("zstd");
+                case GZIP -> Optional.of("zlib");
+            };
+            case PARQUET -> switch (codec) {
+                case NONE -> Optional.of("uncompressed");
+                case SNAPPY -> Optional.of("snappy");
+                case LZ4 -> Optional.of("lz4");
+                case ZSTD -> Optional.of("zstd");
+                case GZIP -> Optional.of("gzip");
+            };
+        };
+        Map<String, String> actual = getTableProperties(tableName);
+        assertThat(actual).contains(entry("write.format.default", format.name()));
+        codecName.ifPresent(name -> assertThat(actual).contains(entry("write.%s.compression-codec".formatted(format.name().toLowerCase(ENGLISH)), name)));
+        if (format != PARQUET) {
+            // this is incorrectly persisted in Iceberg: https://github.com/trinodb/trino/issues/20401
+            assertThat(actual).contains(entry("write.parquet.compression-codec", "zstd"));
+        }
+    }
+
+    private Map<String, String> getTableProperties(String tableName)
+    {
+        return computeActual("SELECT key, value FROM \"" + tableName + "$properties\"").getMaterializedRows().stream()
+                .collect(toImmutableMap(row -> (String) row.getField(0), row -> (String) row.getField(1)));
     }
 
     @Test
@@ -9181,7 +9234,7 @@ public abstract class BaseIcebergConnectorTest
     {
         return plan -> {
             int actualRemoteExchangesCount = searchFrom(plan.getRoot())
-                    .where(node -> node instanceof ExchangeNode && ((ExchangeNode) node).getScope() == ExchangeNode.Scope.REMOTE)
+                    .where(node -> node instanceof ExchangeNode exchangeNode && exchangeNode.getScope() == ExchangeNode.Scope.REMOTE)
                     .count();
             assertThat(actualRemoteExchangesCount).isEqualTo(expectedRemoteExchangesCount);
         };

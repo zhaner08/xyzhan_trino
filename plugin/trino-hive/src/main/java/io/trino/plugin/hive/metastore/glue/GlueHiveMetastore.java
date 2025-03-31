@@ -44,6 +44,7 @@ import io.trino.plugin.hive.HivePartitionManager;
 import io.trino.plugin.hive.PartitionNotFoundException;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.TrinoException;
+import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.connector.SchemaNotFoundException;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.TableNotFoundException;
@@ -93,7 +94,6 @@ import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
@@ -170,16 +170,14 @@ public class GlueHiveMetastore
     private static final int BATCH_UPDATE_PARTITION_MAX_PAGE_SIZE = 100;
     private static final int AWS_GLUE_GET_FUNCTIONS_MAX_RESULTS = 100;
 
-    private static final AtomicInteger poolCounter = new AtomicInteger();
-
     private final GlueClient glueClient;
     private final GlueContext glueContext;
     private final GlueCache glueCache;
+    private final GlueMetastoreStats stats;
     private final TrinoFileSystem fileSystem;
     private final Optional<String> defaultDir;
     private final int partitionSegments;
     private final boolean assumeCanonicalPartitionKeys;
-    private final GlueMetastoreStats stats = new GlueMetastoreStats();
     private final Predicate<software.amazon.awssdk.services.glue.model.Table> tableVisibilityFilter;
     private final ExecutorService executor;
 
@@ -188,26 +186,31 @@ public class GlueHiveMetastore
             GlueClient glueClient,
             GlueContext glueContext,
             GlueCache glueCache,
+            GlueMetastoreStats glueStats,
             TrinoFileSystemFactory fileSystemFactory,
             GlueHiveMetastoreConfig config,
+            CatalogName catalogName,
             Set<TableKind> visibleTableKinds)
     {
         this(
                 glueClient,
                 glueContext,
                 glueCache,
+                glueStats,
                 fileSystemFactory.create(ConnectorIdentity.ofUser(DEFAULT_METASTORE_USER)),
                 config.getDefaultWarehouseDir(),
                 config.getPartitionSegments(),
                 config.isAssumeCanonicalPartitionKeys(),
                 visibleTableKinds,
-                newFixedThreadPool(config.getThreads(), daemonThreadsNamed("glue-%s-%%s".formatted(poolCounter.getAndIncrement()))));
+                newFixedThreadPool(config.getThreads(), daemonThreadsNamed("glue-" + catalogName + "-%s")));
     }
 
     private GlueHiveMetastore(
             GlueClient glueClient,
             GlueContext glueContext,
-            GlueCache glueCache, TrinoFileSystem fileSystem,
+            GlueCache glueCache,
+            GlueMetastoreStats glueStats,
+            TrinoFileSystem fileSystem,
             Optional<String> defaultDir,
             int partitionSegments,
             boolean assumeCanonicalPartitionKeys,
@@ -217,6 +220,7 @@ public class GlueHiveMetastore
         this.glueClient = requireNonNull(glueClient, "glueClient is null");
         this.glueContext = requireNonNull(glueContext, "glueContext is null");
         this.glueCache = glueCache;
+        this.stats = requireNonNull(glueStats, "glueStats is null");
         this.fileSystem = requireNonNull(fileSystem, "fileSystem is null");
         this.defaultDir = requireNonNull(defaultDir, "defaultDir is null");
         this.partitionSegments = partitionSegments;
@@ -602,7 +606,7 @@ public class GlueHiveMetastore
     }
 
     @Override
-    public void replaceTable(String databaseName, String tableName, Table newTable, PrincipalPrivileges principalPrivileges)
+    public void replaceTable(String databaseName, String tableName, Table newTable, PrincipalPrivileges principalPrivileges, Map<String, String> environmentContext)
     {
         if (!tableName.equals(newTable.getTableName()) || !databaseName.equals(newTable.getDatabaseName())) {
             throw new TrinoException(NOT_SUPPORTED, "Table rename is not yet supported by Glue service");

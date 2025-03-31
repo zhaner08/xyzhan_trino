@@ -51,7 +51,15 @@ public class S3FileSystemConfig
     {
         STANDARD,
         STANDARD_IA,
-        INTELLIGENT_TIERING;
+        INTELLIGENT_TIERING,
+        REDUCED_REDUNDANCY,
+        ONEZONE_IA,
+        GLACIER,
+        DEEP_ARCHIVE,
+        OUTPOSTS,
+        GLACIER_IR,
+        SNOW,
+        EXPRESS_ONEZONE;
 
         public static StorageClass toStorageClass(StorageClassType storageClass)
         {
@@ -59,6 +67,14 @@ public class S3FileSystemConfig
                 case STANDARD -> StorageClass.STANDARD;
                 case STANDARD_IA -> StorageClass.STANDARD_IA;
                 case INTELLIGENT_TIERING -> StorageClass.INTELLIGENT_TIERING;
+                case REDUCED_REDUNDANCY -> StorageClass.REDUCED_REDUNDANCY;
+                case ONEZONE_IA -> StorageClass.ONEZONE_IA;
+                case GLACIER -> StorageClass.GLACIER;
+                case DEEP_ARCHIVE -> StorageClass.DEEP_ARCHIVE;
+                case OUTPOSTS -> StorageClass.OUTPOSTS;
+                case GLACIER_IR -> StorageClass.GLACIER_IR;
+                case SNOW -> StorageClass.SNOW;
+                case EXPRESS_ONEZONE -> StorageClass.EXPRESS_ONEZONE;
             };
         }
     }
@@ -73,7 +89,7 @@ public class S3FileSystemConfig
         BUCKET_OWNER_READ,
         BUCKET_OWNER_FULL_CONTROL;
 
-        public static ObjectCannedACL getCannedAcl(S3FileSystemConfig.ObjectCannedAcl cannedAcl)
+        public static ObjectCannedACL getCannedAcl(ObjectCannedAcl cannedAcl)
         {
             return switch (cannedAcl) {
                 case NONE -> null;
@@ -136,6 +152,7 @@ public class S3FileSystemConfig
     private RetryMode retryMode = RetryMode.LEGACY;
     private int maxErrorRetries = 10;
     private boolean supportsExclusiveCreate = true;
+    private boolean crossRegionAccessEnabled;
     private String applicationId = "Trino";
 
     public String getAwsAccessKey()
@@ -567,6 +584,19 @@ public class S3FileSystemConfig
     public S3FileSystemConfig setSupportsExclusiveCreate(boolean supportsExclusiveCreate)
     {
         this.supportsExclusiveCreate = supportsExclusiveCreate;
+        return this;
+    }
+
+    public boolean isCrossRegionAccessEnabled()
+    {
+        return crossRegionAccessEnabled;
+    }
+
+    @Config("s3.cross-region-access")
+    @ConfigDescription("Enable S3 cross region access")
+    public S3FileSystemConfig setCrossRegionAccessEnabled(boolean crossRegionAccessEnabled)
+    {
+        this.crossRegionAccessEnabled = crossRegionAccessEnabled;
         return this;
     }
 

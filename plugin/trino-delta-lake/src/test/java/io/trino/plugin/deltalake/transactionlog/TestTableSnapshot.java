@@ -40,11 +40,13 @@ import java.net.URISyntaxException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import static com.google.common.base.Predicates.alwaysTrue;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 import static io.trino.filesystem.tracing.FileSystemAttributes.FILE_LOCATION;
 import static io.trino.plugin.deltalake.DeltaLakeConfig.DEFAULT_TRANSACTION_LOG_MAX_CACHED_SIZE;
 import static io.trino.plugin.deltalake.transactionlog.TableSnapshot.MetadataAndProtocolEntry;
@@ -125,128 +127,133 @@ public class TestTableSnapshot
     public void readsCheckpointFile()
             throws IOException
     {
-        Optional<LastCheckpoint> lastCheckpoint = readLastCheckpoint(trackingFileSystem, tableLocation);
-        TableSnapshot tableSnapshot = load(
-                new SchemaTableName("schema", "person"),
-                lastCheckpoint,
-                trackingFileSystem,
-                tableLocation,
-                parquetReaderOptions,
-                true,
-                domainCompactionThreshold,
-                DEFAULT_TRANSACTION_LOG_MAX_CACHED_SIZE,
-                Optional.empty());
-        TestingConnectorContext context = new TestingConnectorContext();
-        TypeManager typeManager = context.getTypeManager();
-        TransactionLogAccess transactionLogAccess = new TransactionLogAccess(
-                typeManager,
-                new CheckpointSchemaManager(typeManager),
-                new DeltaLakeConfig(),
-                new FileFormatDataSourceStats(),
-                tracingFileSystemFactory,
-                new ParquetReaderConfig());
-        MetadataEntry metadataEntry = transactionLogAccess.getMetadataEntry(SESSION, tableSnapshot);
-        ProtocolEntry protocolEntry = transactionLogAccess.getProtocolEntry(SESSION, tableSnapshot);
-        tableSnapshot.setCachedMetadata(Optional.of(metadataEntry));
-        try (Stream<DeltaLakeTransactionLogEntry> stream = tableSnapshot.getCheckpointTransactionLogEntries(
-                SESSION,
-                ImmutableSet.of(ADD),
-                checkpointSchemaManager,
-                TESTING_TYPE_MANAGER,
-                trackingFileSystem,
-                new FileFormatDataSourceStats(),
-                Optional.of(new MetadataAndProtocolEntry(metadataEntry, protocolEntry)),
-                TupleDomain.all(),
-                Optional.of(alwaysTrue()))) {
-            List<DeltaLakeTransactionLogEntry> entries = stream.collect(toImmutableList());
+        try (ExecutorService executorService = newDirectExecutorService()) {
+            Optional<LastCheckpoint> lastCheckpoint = readLastCheckpoint(trackingFileSystem, tableLocation);
+            TableSnapshot tableSnapshot = load(
+                    new SchemaTableName("schema", "person"),
+                    lastCheckpoint,
+                    trackingFileSystem,
+                    tableLocation,
+                    parquetReaderOptions,
+                    true,
+                    domainCompactionThreshold,
+                    DEFAULT_TRANSACTION_LOG_MAX_CACHED_SIZE,
+                    Optional.empty());
+            TestingConnectorContext context = new TestingConnectorContext();
+            TypeManager typeManager = context.getTypeManager();
+            TransactionLogAccess transactionLogAccess = new TransactionLogAccess(
+                    typeManager,
+                    new CheckpointSchemaManager(typeManager),
+                    new DeltaLakeConfig(),
+                    new FileFormatDataSourceStats(),
+                    tracingFileSystemFactory,
+                    new ParquetReaderConfig(),
+                    executorService);
+            MetadataEntry metadataEntry = transactionLogAccess.getMetadataEntry(SESSION, tableSnapshot);
+            ProtocolEntry protocolEntry = transactionLogAccess.getProtocolEntry(SESSION, tableSnapshot);
+            tableSnapshot.setCachedMetadata(Optional.of(metadataEntry));
+            try (Stream<DeltaLakeTransactionLogEntry> stream = tableSnapshot.getCheckpointTransactionLogEntries(
+                    SESSION,
+                    ImmutableSet.of(ADD),
+                    checkpointSchemaManager,
+                    TESTING_TYPE_MANAGER,
+                    trackingFileSystem,
+                    new FileFormatDataSourceStats(),
+                    Optional.of(new MetadataAndProtocolEntry(metadataEntry, protocolEntry)),
+                    TupleDomain.all(),
+                    Optional.of(alwaysTrue()),
+                    executorService)) {
+                List<DeltaLakeTransactionLogEntry> entries = stream.collect(toImmutableList());
 
-            assertThat(entries).hasSize(9);
+                assertThat(entries).hasSize(9);
 
-            assertThat(entries).element(3).extracting(DeltaLakeTransactionLogEntry::getAdd).isEqualTo(
-                    new AddFileEntry(
-                            "age=42/part-00003-0f53cae3-3e34-4876-b651-e1db9584dbc3.c000.snappy.parquet",
-                            Map.of("age", "42"),
-                            2634,
-                            1579190165000L,
-                            false,
-                            Optional.of("{" +
-                                    "\"numRecords\":1," +
-                                    "\"minValues\":{\"name\":\"Alice\",\"address\":{\"street\":\"100 Main St\",\"city\":\"Anytown\",\"state\":\"NY\",\"zip\":\"12345\"},\"income\":111000.0}," +
-                                    "\"maxValues\":{\"name\":\"Alice\",\"address\":{\"street\":\"100 Main St\",\"city\":\"Anytown\",\"state\":\"NY\",\"zip\":\"12345\"},\"income\":111000.0}," +
-                                    "\"nullCount\":{\"name\":0,\"married\":0,\"phones\":0,\"address\":{\"street\":0,\"city\":0,\"state\":0,\"zip\":0},\"income\":0}" +
-                                    "}"),
-                            Optional.empty(),
-                            null,
-                            Optional.empty()));
+                assertThat(entries).element(3).extracting(DeltaLakeTransactionLogEntry::getAdd).isEqualTo(
+                        new AddFileEntry(
+                                "age=42/part-00003-0f53cae3-3e34-4876-b651-e1db9584dbc3.c000.snappy.parquet",
+                                Map.of("age", "42"),
+                                2634,
+                                1579190165000L,
+                                false,
+                                Optional.of("{" +
+                                        "\"numRecords\":1," +
+                                        "\"minValues\":{\"name\":\"Alice\",\"address\":{\"street\":\"100 Main St\",\"city\":\"Anytown\",\"state\":\"NY\",\"zip\":\"12345\"},\"income\":111000.0}," +
+                                        "\"maxValues\":{\"name\":\"Alice\",\"address\":{\"street\":\"100 Main St\",\"city\":\"Anytown\",\"state\":\"NY\",\"zip\":\"12345\"},\"income\":111000.0}," +
+                                        "\"nullCount\":{\"name\":0,\"married\":0,\"phones\":0,\"address\":{\"street\":0,\"city\":0,\"state\":0,\"zip\":0},\"income\":0}" +
+                                        "}"),
+                                Optional.empty(),
+                                null,
+                                Optional.empty()));
 
-            assertThat(entries).element(7).extracting(DeltaLakeTransactionLogEntry::getAdd).isEqualTo(
-                    new AddFileEntry(
-                            "age=30/part-00002-5800be2e-2373-47d8-8b86-776a8ea9d69f.c000.snappy.parquet",
-                            Map.of("age", "30"),
-                            2688,
-                            1579190165000L,
-                            false,
-                            Optional.of("{" +
-                                    "\"numRecords\":1," +
-                                    "\"minValues\":{\"name\":\"Andy\",\"address\":{\"street\":\"101 Main St\",\"city\":\"Anytown\",\"state\":\"NY\",\"zip\":\"12345\"},\"income\":81000.0}," +
-                                    "\"maxValues\":{\"name\":\"Andy\",\"address\":{\"street\":\"101 Main St\",\"city\":\"Anytown\",\"state\":\"NY\",\"zip\":\"12345\"},\"income\":81000.0}," +
-                                    "\"nullCount\":{\"name\":0,\"married\":0,\"phones\":0,\"address\":{\"street\":0,\"city\":0,\"state\":0,\"zip\":0},\"income\":0}" +
-                                    "}"),
-                            Optional.empty(),
-                            null,
-                            Optional.empty()));
-        }
+                assertThat(entries).element(7).extracting(DeltaLakeTransactionLogEntry::getAdd).isEqualTo(
+                        new AddFileEntry(
+                                "age=30/part-00002-5800be2e-2373-47d8-8b86-776a8ea9d69f.c000.snappy.parquet",
+                                Map.of("age", "30"),
+                                2688,
+                                1579190165000L,
+                                false,
+                                Optional.of("{" +
+                                        "\"numRecords\":1," +
+                                        "\"minValues\":{\"name\":\"Andy\",\"address\":{\"street\":\"101 Main St\",\"city\":\"Anytown\",\"state\":\"NY\",\"zip\":\"12345\"},\"income\":81000.0}," +
+                                        "\"maxValues\":{\"name\":\"Andy\",\"address\":{\"street\":\"101 Main St\",\"city\":\"Anytown\",\"state\":\"NY\",\"zip\":\"12345\"},\"income\":81000.0}," +
+                                        "\"nullCount\":{\"name\":0,\"married\":0,\"phones\":0,\"address\":{\"street\":0,\"city\":0,\"state\":0,\"zip\":0},\"income\":0}" +
+                                        "}"),
+                                Optional.empty(),
+                                null,
+                                Optional.empty()));
+            }
 
-        // lets read two entry types in one call; add and protocol
-        try (Stream<DeltaLakeTransactionLogEntry> stream = tableSnapshot.getCheckpointTransactionLogEntries(
-                SESSION,
-                ImmutableSet.of(ADD, PROTOCOL),
-                checkpointSchemaManager,
-                TESTING_TYPE_MANAGER,
-                trackingFileSystem,
-                new FileFormatDataSourceStats(),
-                Optional.of(new MetadataAndProtocolEntry(metadataEntry, protocolEntry)),
-                TupleDomain.all(),
-                Optional.of(alwaysTrue()))) {
-            List<DeltaLakeTransactionLogEntry> entries = stream.collect(toImmutableList());
+            // lets read two entry types in one call; add and protocol
+            try (Stream<DeltaLakeTransactionLogEntry> stream = tableSnapshot.getCheckpointTransactionLogEntries(
+                    SESSION,
+                    ImmutableSet.of(ADD, PROTOCOL),
+                    checkpointSchemaManager,
+                    TESTING_TYPE_MANAGER,
+                    trackingFileSystem,
+                    new FileFormatDataSourceStats(),
+                    Optional.of(new MetadataAndProtocolEntry(metadataEntry, protocolEntry)),
+                    TupleDomain.all(),
+                    Optional.of(alwaysTrue()),
+                    executorService)) {
+                List<DeltaLakeTransactionLogEntry> entries = stream.collect(toImmutableList());
 
-            assertThat(entries).hasSize(10);
+                assertThat(entries).hasSize(10);
 
-            assertThat(entries).element(3).extracting(DeltaLakeTransactionLogEntry::getAdd).isEqualTo(
-                    new AddFileEntry(
-                            "age=42/part-00003-0f53cae3-3e34-4876-b651-e1db9584dbc3.c000.snappy.parquet",
-                            Map.of("age", "42"),
-                            2634,
-                            1579190165000L,
-                            false,
-                            Optional.of("{" +
-                                    "\"numRecords\":1," +
-                                    "\"minValues\":{\"name\":\"Alice\",\"address\":{\"street\":\"100 Main St\",\"city\":\"Anytown\",\"state\":\"NY\",\"zip\":\"12345\"},\"income\":111000.0}," +
-                                    "\"maxValues\":{\"name\":\"Alice\",\"address\":{\"street\":\"100 Main St\",\"city\":\"Anytown\",\"state\":\"NY\",\"zip\":\"12345\"},\"income\":111000.0}," +
-                                    "\"nullCount\":{\"name\":0,\"married\":0,\"phones\":0,\"address\":{\"street\":0,\"city\":0,\"state\":0,\"zip\":0},\"income\":0}" +
-                                    "}"),
-                            Optional.empty(),
-                            null,
-                            Optional.empty()));
+                assertThat(entries).element(3).extracting(DeltaLakeTransactionLogEntry::getAdd).isEqualTo(
+                        new AddFileEntry(
+                                "age=42/part-00003-0f53cae3-3e34-4876-b651-e1db9584dbc3.c000.snappy.parquet",
+                                Map.of("age", "42"),
+                                2634,
+                                1579190165000L,
+                                false,
+                                Optional.of("{" +
+                                        "\"numRecords\":1," +
+                                        "\"minValues\":{\"name\":\"Alice\",\"address\":{\"street\":\"100 Main St\",\"city\":\"Anytown\",\"state\":\"NY\",\"zip\":\"12345\"},\"income\":111000.0}," +
+                                        "\"maxValues\":{\"name\":\"Alice\",\"address\":{\"street\":\"100 Main St\",\"city\":\"Anytown\",\"state\":\"NY\",\"zip\":\"12345\"},\"income\":111000.0}," +
+                                        "\"nullCount\":{\"name\":0,\"married\":0,\"phones\":0,\"address\":{\"street\":0,\"city\":0,\"state\":0,\"zip\":0},\"income\":0}" +
+                                        "}"),
+                                Optional.empty(),
+                                null,
+                                Optional.empty()));
 
-            assertThat(entries).element(6).extracting(DeltaLakeTransactionLogEntry::getProtocol).isEqualTo(new ProtocolEntry(1, 2, Optional.empty(), Optional.empty()));
+                assertThat(entries).element(6).extracting(DeltaLakeTransactionLogEntry::getProtocol).isEqualTo(new ProtocolEntry(1, 2, Optional.empty(), Optional.empty()));
 
-            assertThat(entries).element(8).extracting(DeltaLakeTransactionLogEntry::getAdd).isEqualTo(
-                    new AddFileEntry(
-                            "age=30/part-00002-5800be2e-2373-47d8-8b86-776a8ea9d69f.c000.snappy.parquet",
-                            Map.of("age", "30"),
-                            2688,
-                            1579190165000L,
-                            false,
-                            Optional.of("{" +
-                                    "\"numRecords\":1," +
-                                    "\"minValues\":{\"name\":\"Andy\",\"address\":{\"street\":\"101 Main St\",\"city\":\"Anytown\",\"state\":\"NY\",\"zip\":\"12345\"},\"income\":81000.0}," +
-                                    "\"maxValues\":{\"name\":\"Andy\",\"address\":{\"street\":\"101 Main St\",\"city\":\"Anytown\",\"state\":\"NY\",\"zip\":\"12345\"},\"income\":81000.0}," +
-                                    "\"nullCount\":{\"name\":0,\"married\":0,\"phones\":0,\"address\":{\"street\":0,\"city\":0,\"state\":0,\"zip\":0},\"income\":0}" +
-                                    "}"),
-                            Optional.empty(),
-                            null,
-                            Optional.empty()));
+                assertThat(entries).element(8).extracting(DeltaLakeTransactionLogEntry::getAdd).isEqualTo(
+                        new AddFileEntry(
+                                "age=30/part-00002-5800be2e-2373-47d8-8b86-776a8ea9d69f.c000.snappy.parquet",
+                                Map.of("age", "30"),
+                                2688,
+                                1579190165000L,
+                                false,
+                                Optional.of("{" +
+                                        "\"numRecords\":1," +
+                                        "\"minValues\":{\"name\":\"Andy\",\"address\":{\"street\":\"101 Main St\",\"city\":\"Anytown\",\"state\":\"NY\",\"zip\":\"12345\"},\"income\":81000.0}," +
+                                        "\"maxValues\":{\"name\":\"Andy\",\"address\":{\"street\":\"101 Main St\",\"city\":\"Anytown\",\"state\":\"NY\",\"zip\":\"12345\"},\"income\":81000.0}," +
+                                        "\"nullCount\":{\"name\":0,\"married\":0,\"phones\":0,\"address\":{\"street\":0,\"city\":0,\"state\":0,\"zip\":0},\"income\":0}" +
+                                        "}"),
+                                Optional.empty(),
+                                null,
+                                Optional.empty()));
+            }
         }
     }
 

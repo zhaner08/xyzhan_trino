@@ -21,6 +21,7 @@ import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.TrinoOutputFile;
 import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
+import io.trino.plugin.deltalake.ForDeltaLakeMetadata;
 import io.trino.plugin.deltalake.transactionlog.DeltaLakeTransactionLogEntry;
 import io.trino.plugin.deltalake.transactionlog.TableSnapshot;
 import io.trino.plugin.deltalake.transactionlog.TableSnapshot.MetadataAndProtocolEntry;
@@ -36,6 +37,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
 import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -60,6 +62,7 @@ public class CheckpointWriterManager
     private final TransactionLogAccess transactionLogAccess;
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
     private final JsonCodec<LastCheckpoint> lastCheckpointCodec;
+    private final ExecutorService executor;
 
     @Inject
     public CheckpointWriterManager(
@@ -69,7 +72,8 @@ public class CheckpointWriterManager
             NodeVersion nodeVersion,
             TransactionLogAccess transactionLogAccess,
             FileFormatDataSourceStats fileFormatDataSourceStats,
-            JsonCodec<LastCheckpoint> lastCheckpointCodec)
+            JsonCodec<LastCheckpoint> lastCheckpointCodec,
+            @ForDeltaLakeMetadata ExecutorService executor)
     {
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.checkpointSchemaManager = requireNonNull(checkpointSchemaManager, "checkpointSchemaManager is null");
@@ -78,6 +82,7 @@ public class CheckpointWriterManager
         this.transactionLogAccess = requireNonNull(transactionLogAccess, "transactionLogAccess is null");
         this.fileFormatDataSourceStats = requireNonNull(fileFormatDataSourceStats, "fileFormatDataSourceStats is null");
         this.lastCheckpointCodec = requireNonNull(lastCheckpointCodec, "lastCheckpointCodec is null");
+        this.executor = requireNonNull(executor, "executor is null");
     }
 
     public void writeCheckpoint(ConnectorSession session, TableSnapshot snapshot)
@@ -106,7 +111,8 @@ public class CheckpointWriterManager
                     fileFormatDataSourceStats,
                     Optional.empty(),
                     TupleDomain.all(),
-                    Optional.empty())) {
+                    Optional.empty(),
+                    executor)) {
                 checkpointLogEntries = checkpointLogEntriesStream.filter(entry -> entry.getMetaData() != null || entry.getProtocol() != null)
                         .collect(toImmutableList());
             }
@@ -141,7 +147,8 @@ public class CheckpointWriterManager
                         fileFormatDataSourceStats,
                         Optional.of(new MetadataAndProtocolEntry(metadataLogEntry.getMetaData(), protocolLogEntry.getProtocol())),
                         TupleDomain.all(),
-                        Optional.of(alwaysTrue()))) {
+                        Optional.of(alwaysTrue()),
+                        executor)) {
                     checkpointLogEntriesStream.forEach(checkpointBuilder::addLogEntry);
                 }
             }

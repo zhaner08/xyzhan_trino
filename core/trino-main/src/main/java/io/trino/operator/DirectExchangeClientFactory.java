@@ -150,7 +150,7 @@ public class DirectExchangeClientFactory
         @SuppressWarnings("resource")
         DirectExchangeBuffer buffer = switch (retryPolicy) {
             case TASK -> throw new UnsupportedOperationException();
-            case QUERY -> new DeduplicatingDirectExchangeBuffer(scheduler, deduplicationBufferSize, retryPolicy, exchangeManagerRegistry, queryId, parentSpan, exchangeId);
+            case QUERY -> new HybridExchangeBuffer(scheduler, deduplicationBufferSize, maxBufferedBytes, exchangeManagerRegistry, queryId, parentSpan, exchangeId);
             case NONE -> new StreamingDirectExchangeBuffer(scheduler, maxBufferedBytes);
         };
 
